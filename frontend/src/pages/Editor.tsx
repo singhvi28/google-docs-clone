@@ -17,6 +17,7 @@ import {
 } from 'y-protocols/awareness';
 import { api } from '../lib/api';
 import { decodeYjsUpdate, encodeYjsUpdate } from '../lib/yjsSync';
+import { connectCollabTransport, type CollabTransport } from '../lib/collabTransport';
 import { CollaborationCursor } from '../lib/collaborationCursor';
 import Toolbar from '../components/Toolbar';
 import ApprovalPopup from '../components/ApprovalPopup';
@@ -40,7 +41,7 @@ export default function Editor() {
   >([]);
   const ydoc = useMemo(() => new Y.Doc(), [editKey]);
   const awareness = useMemo(() => new Awareness(ydoc), [ydoc]);
-  const wsRef = useRef<WebSocket | null>(null);
+  const transportRef = useRef<CollabTransport | null>(null);
 
   useEffect(() => {
     if (!editKey) return;
@@ -54,32 +55,22 @@ export default function Editor() {
       navigate('/dashboard', { replace: true });
     });
 
-    // Connect WebSocket for document sync and control messages.
-    const wsUrl = api.getWsUrl(editKey);
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
     let canPublish = false;
-
-    const sendDocumentState = () => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({
-        type: 'sync_update',
-        data: encodeYjsUpdate(Y.encodeStateAsUpdate(ydoc)),
-      }));
-    };
+    let cancelled = false;
+    let transport: CollabTransport | null = null;
 
     const sendAwarenessUpdate = (clientIds: number[]) => {
-      if (ws.readyState !== WebSocket.OPEN || clientIds.length === 0) return;
-      ws.send(JSON.stringify({
-        type: 'awareness',
-        data: encodeYjsUpdate(encodeAwarenessUpdate(awareness, clientIds)),
-      }));
+      if (!transport || clientIds.length === 0) return;
+      transport.sendAwareness(
+        encodeYjsUpdate(encodeAwarenessUpdate(awareness, clientIds)),
+      );
     };
 
-    const handleYjsUpdate = (_update: Uint8Array, origin: unknown) => {
+    const handleYjsUpdate = (update: Uint8Array, origin: unknown) => {
       if (origin === 'remote') return;
-      if (!canPublish) return;
-      sendDocumentState();
+      if (!canPublish || !transport) return;
+      // Send incremental Yjs deltas (not full-state overrides)
+      transport.sendSync(encodeYjsUpdate(update));
     };
 
     const handleAwarenessUpdate = (
@@ -98,45 +89,60 @@ export default function Editor() {
     awareness.on('update', handleAwarenessUpdate);
     awareness.on('change', updateEditorCount);
 
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'approval_request') {
-          setApprovalRequests(prev => [...prev, {
-            user_id: msg.user_id,
-            moniker: msg.moniker,
-          }]);
-        } else if (msg.type === 'connected') {
-          setConnected(true);
-          awareness.setLocalStateField('user', {
-            name: msg.moniker,
-            color: msg.color,
-            colorLight: `${msg.color}40`,
-          });
-        } else if (msg.type === 'approved') {
-          setConnected(true);
-        } else if ((msg.type === 'sync_state' || msg.type === 'sync_update') && msg.data) {
-          Y.applyUpdate(ydoc, decodeYjsUpdate(msg.data), 'remote');
-        } else if (msg.type === 'awareness' && msg.data) {
-          applyAwarenessUpdate(awareness, decodeYjsUpdate(msg.data), 'remote');
-        } else if (msg.type === 'awareness_request') {
-          sendAwarenessUpdate([awareness.clientID]);
-        } else if (msg.type === 'sync_ready') {
-          canPublish = true;
-        }
-      } catch { /* ignore malformed websocket messages */ }
-    };
+    void connectCollabTransport(
+      api.getWsUrl(editKey),
+      api.getWtUrl(editKey),
+      {
+        onOpen: () => {
+          if (!cancelled) setConnected(true);
+        },
+        onClose: () => {
+          if (!cancelled) setConnected(false);
+        },
+        onMessage: (msg) => {
+          if (msg.type === 'approval_request') {
+            setApprovalRequests(prev => [...prev, {
+              user_id: String(msg.user_id),
+              moniker: String(msg.moniker),
+            }]);
+          } else if (msg.type === 'connected') {
+            setConnected(true);
+            awareness.setLocalStateField('user', {
+              name: msg.moniker,
+              color: msg.color,
+              colorLight: `${msg.color}40`,
+            });
+          } else if (msg.type === 'approved') {
+            setConnected(true);
+          } else if ((msg.type === 'sync_state' || msg.type === 'sync_update') && msg.data) {
+            Y.applyUpdate(ydoc, decodeYjsUpdate(msg.data), 'remote');
+          } else if (msg.type === 'awareness' && msg.data) {
+            applyAwarenessUpdate(awareness, decodeYjsUpdate(msg.data), 'remote');
+          } else if (msg.type === 'awareness_request') {
+            sendAwarenessUpdate([awareness.clientID]);
+          } else if (msg.type === 'sync_ready') {
+            canPublish = true;
+          }
+        },
+      },
+    ).then((t) => {
+      if (cancelled) {
+        t.close();
+        return;
+      }
+      transport = t;
+      transportRef.current = t;
+    });
 
     return () => {
+      cancelled = true;
       awareness.setLocalState(null);
       awareness.off('change', updateEditorCount);
       awareness.off('update', handleAwarenessUpdate);
       ydoc.off('update', handleYjsUpdate);
-      ws.close();
+      transport?.close();
+      transportRef.current?.close();
+      transportRef.current = null;
     };
   }, [awareness, editKey, navigate, ydoc]);
 
@@ -180,18 +186,18 @@ export default function Editor() {
   }, [docId]);
 
   const handleApprove = useCallback((userId: string) => {
-    wsRef.current?.send(JSON.stringify({
+    transportRef.current?.sendJson({
       type: 'approve_editor',
       user_id: userId,
-    }));
+    });
     setApprovalRequests(prev => prev.filter(r => r.user_id !== userId));
   }, []);
 
   const handleDeny = useCallback((userId: string) => {
-    wsRef.current?.send(JSON.stringify({
+    transportRef.current?.sendJson({
       type: 'deny_editor',
       user_id: userId,
-    }));
+    });
     setApprovalRequests(prev => prev.filter(r => r.user_id !== userId));
   }, []);
 

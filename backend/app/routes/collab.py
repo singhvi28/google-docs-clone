@@ -1,29 +1,36 @@
 """
 Collaboration WebSocket endpoint for Yjs CRDT synchronization.
 
-This implements a lightweight Yjs sync protocol over WebSocket:
-- Clients send binary Yjs updates
-- Server broadcasts updates to all other clients in the same document
-- Server caches the merged CRDT state in Redis
-- Periodic flush to PostgreSQL for persistence
+Stateless design: each server instance publishes outbound messages to Redis
+Pub/Sub and listens on the same channel to forward updates to local sockets.
+CRDT updates are stored as an append-only Redis log and merged on flush/join.
 """
 import asyncio
+import base64
 import logging
 import json
-from typing import Dict, Set
-from uuid import UUID
+import uuid
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db, async_session_factory
-from app.models import Document, DocumentPermission, User
+from app.database import async_session_factory
+from app.models import Document, DocumentPermission
 from app.routes.auth import decode_access_token
 from app.services.redis_service import (
-    get_active_editor_count, increment_editor_count,
-    decrement_editor_count, cache_crdt_state, get_cached_crdt_state,
-    add_pending_editor, remove_pending_editor, publish_update,
+    get_active_editor_count,
+    increment_editor_count,
+    decrement_editor_count,
+    append_crdt_update,
+    get_merged_crdt_state,
+    get_crdt_updates,
+    clear_crdt_updates,
+    merge_crdt_updates,
+    seed_crdt_state_if_empty,
+    add_pending_editor,
+    remove_pending_editor,
+    publish_update,
+    subscribe_to_document,
 )
 from app.utils import generate_moniker, generate_cursor_color
 from app.config import get_settings
@@ -32,11 +39,33 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter(tags=["collaboration"])
 
-# In-memory connection registry (per-process)
-# Maps edit_key -> set of WebSocket connections
-document_connections: Dict[str, Set[WebSocket]] = {}
-# Maps edit_key -> creator's WebSocket (for approval notifications)
-creator_connections: Dict[str, WebSocket] = {}
+
+async def redis_listener(pubsub, websocket: WebSocket, connection_id: str):
+    """Forward Redis Pub/Sub messages to this WebSocket, skipping our own echoes."""
+    try:
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            data = message["data"]
+            text = data.decode() if isinstance(data, bytes) else data
+            try:
+                parsed = json.loads(text)
+                if parsed.get("_sid") == connection_id:
+                    continue
+                parsed.pop("_sid", None)
+                await websocket.send_text(json.dumps(parsed))
+            except Exception:
+                await websocket.send_text(text)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
+async def _publish(edit_key: str, payload: dict, connection_id: str) -> None:
+    """Publish a JSON payload to the document channel, tagged with sender id."""
+    envelope = {**payload, "_sid": connection_id}
+    await publish_update(edit_key, json.dumps(envelope).encode())
 
 
 @router.websocket("/ws/doc/{edit_key}")
@@ -47,19 +76,17 @@ async def document_websocket(
 ):
     """
     WebSocket endpoint for real-time document collaboration.
-    
+
     Protocol:
-    - Client sends JSON: {"type": "sync", "data": "<base64 encoded Yjs update>"}
-    - Client sends JSON: {"type": "awareness", "data": {...cursor info...}}
-    - Server broadcasts to all other connections in the same document
+    - Client sends JSON: {"type": "sync_update", "data": "<base64 Yjs update>"}
+    - Client sends JSON: {"type": "awareness", "data": "<base64 awareness>"}
+    - Server appends CRDT deltas to Redis and publishes via Pub/Sub
     """
-    # Authenticate
     user_id = decode_access_token(token)
     if not user_id:
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
-    # Verify document exists
     async with async_session_factory() as db:
         result = await db.execute(
             select(Document).where(Document.edit_key == edit_key)
@@ -69,7 +96,6 @@ async def document_websocket(
             await websocket.close(code=4004, reason="Document not found")
             return
 
-        # Check permission
         perm_result = await db.execute(
             select(DocumentPermission).where(
                 DocumentPermission.document_id == doc.id,
@@ -78,8 +104,9 @@ async def document_websocket(
         )
         perm = perm_result.scalar_one_or_none()
         is_creator = str(doc.creator_id) == user_id
+        persisted_state = doc.crdt_state
+        doc_id = doc.id
 
-        # Check editor limit
         editor_count = await get_active_editor_count(edit_key)
         if editor_count >= settings.MAX_EDITORS_PER_DOCUMENT and not is_creator:
             await websocket.accept()
@@ -90,7 +117,6 @@ async def document_websocket(
             await websocket.close(code=4029, reason="Room full")
             return
 
-        # If user has no permission and isn't creator, they need approval
         if not perm and not is_creator:
             moniker = generate_moniker()
             await websocket.accept()
@@ -98,26 +124,24 @@ async def document_websocket(
                 "type": "pending_approval",
                 "moniker": moniker,
             })
-            # Notify creator
             await add_pending_editor(edit_key, user_id, moniker)
-            if edit_key in creator_connections:
-                try:
-                    await creator_connections[edit_key].send_json({
-                        "type": "approval_request",
-                        "user_id": user_id,
-                        "moniker": moniker,
-                    })
-                except Exception:
-                    pass
+            # Notify creator(s) via Redis — any connected creator receives this
+            await publish_update(
+                edit_key,
+                json.dumps({
+                    "type": "approval_request",
+                    "user_id": user_id,
+                    "moniker": moniker,
+                }).encode(),
+            )
 
-            # Wait for approval (poll Redis)
             approved = False
-            for _ in range(120):  # 2 minute timeout
+            for _ in range(120):
                 await asyncio.sleep(1)
                 async with async_session_factory() as check_db:
                     check = await check_db.execute(
                         select(DocumentPermission).where(
-                            DocumentPermission.document_id == doc.id,
+                            DocumentPermission.document_id == doc_id,
                             DocumentPermission.user_id == user_id,
                         )
                     )
@@ -138,16 +162,14 @@ async def document_websocket(
             perm_moniker = perm.moniker if perm else generate_moniker()
             perm_color = perm.cursor_color if perm else generate_cursor_color()
 
-    # Register connection
+    connection_id = str(uuid.uuid4())
     await increment_editor_count(edit_key)
-    if edit_key not in document_connections:
-        document_connections[edit_key] = set()
-    document_connections[edit_key].add(websocket)
 
-    if is_creator:
-        creator_connections[edit_key] = websocket
+    pubsub = await subscribe_to_document(edit_key)
+    listener_task = asyncio.create_task(
+        redis_listener(pubsub, websocket, connection_id)
+    )
 
-    # Send initial state
     await websocket.send_json({
         "type": "connected",
         "moniker": perm_moniker,
@@ -155,19 +177,19 @@ async def document_websocket(
         "user_id": user_id,
     })
 
-    # Send cached CRDT state if available, falling back to persisted state.
-    cached = await get_cached_crdt_state(edit_key)
-    if not cached and doc.crdt_state:
-        cached = doc.crdt_state
-        await cache_crdt_state(edit_key, cached)
-    if cached:
-        import base64
+    # Seed log from Postgres if empty, then send merged state to the new editor
+    if persisted_state:
+        await seed_crdt_state_if_empty(edit_key, persisted_state)
+
+    merged = await get_merged_crdt_state(edit_key)
+    if merged:
         await websocket.send_json({
             "type": "sync_state",
-            "data": base64.b64encode(cached).decode(),
+            "data": base64.b64encode(merged).decode(),
         })
+
     await websocket.send_json({"type": "sync_ready"})
-    await broadcast(edit_key, websocket, json.dumps({"type": "awareness_request"}))
+    await _publish(edit_key, {"type": "awareness_request"}, connection_id)
 
     try:
         while True:
@@ -176,24 +198,27 @@ async def document_websocket(
             msg_type = msg.get("type")
 
             if msg_type == "sync_update":
-                # Binary CRDT update (base64 encoded)
-                import base64
                 update_data = base64.b64decode(msg["data"])
-                await cache_crdt_state(edit_key, update_data)
-                # Broadcast to all other connections
-                await broadcast(edit_key, websocket, raw)
+                await append_crdt_update(edit_key, update_data)
+                await _publish(
+                    edit_key,
+                    {"type": "sync_update", "data": msg["data"]},
+                    connection_id,
+                )
 
             elif msg_type == "awareness":
-                # Cursor position / awareness update
-                await broadcast(edit_key, websocket, raw)
+                await _publish(
+                    edit_key,
+                    {"type": "awareness", "data": msg.get("data")},
+                    connection_id,
+                )
 
             elif msg_type == "approve_editor":
-                # Creator approving an editor
                 if is_creator:
                     target_id = msg.get("user_id")
                     async with async_session_factory() as db:
                         new_perm = DocumentPermission(
-                            document_id=doc.id,
+                            document_id=doc_id,
                             user_id=target_id,
                             role="editor",
                             moniker=generate_moniker(),
@@ -213,43 +238,37 @@ async def document_websocket(
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        # Cleanup
-        document_connections.get(edit_key, set()).discard(websocket)
-        if not document_connections.get(edit_key):
-            document_connections.pop(edit_key, None)
-        if creator_connections.get(edit_key) is websocket:
-            creator_connections.pop(edit_key, None)
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await pubsub.unsubscribe(f"channel:{edit_key}")
+            await pubsub.aclose()
+        except Exception:
+            pass
+
         count = await decrement_editor_count(edit_key)
-        # If last editor left, flush to postgres
         if count == 0:
             await flush_to_postgres(edit_key)
 
 
-async def broadcast(edit_key: str, sender: WebSocket, message: str):
-    """Broadcast a message to all connections except the sender."""
-    connections = document_connections.get(edit_key, set()).copy()
-    recipients = [ws for ws in connections if ws is not sender]
-    results = await asyncio.gather(
-        *(ws.send_text(message) for ws in recipients),
-        return_exceptions=True,
-    )
-    for ws, result in zip(recipients, results):
-        if not isinstance(result, Exception):
-            continue
-        document_connections.get(edit_key, set()).discard(ws)
-
-
 async def flush_to_postgres(edit_key: str):
-    """Flush the cached CRDT state from Redis to PostgreSQL."""
-    cached = await get_cached_crdt_state(edit_key)
-    if not cached:
+    """Merge Redis update log into one state, persist to Postgres, truncate log."""
+    updates = await get_crdt_updates(edit_key)
+    merged = merge_crdt_updates(updates)
+    if not merged:
         return
+
     async with async_session_factory() as db:
         result = await db.execute(
             select(Document).where(Document.edit_key == edit_key)
         )
         doc = result.scalar_one_or_none()
         if doc:
-            doc.crdt_state = cached
+            doc.crdt_state = merged
             await db.commit()
             logger.info(f"Flushed CRDT state for {edit_key} to Postgres")
+
+    await clear_crdt_updates(edit_key)

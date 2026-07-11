@@ -1,5 +1,6 @@
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const WT_URL = import.meta.env.VITE_WT_URL || '';
 
 export interface User {
   id: string;
@@ -102,10 +103,17 @@ export const api = {
     return res.json();
   },
 
-  // WebSocket URL
+  // WebSocket URL (TCP fallback)
   getWsUrl: (editKey: string): string => {
     const token = getToken();
     return `${WS_URL}/ws/doc/${editKey}?token=${token}`;
+  },
+
+  // WebTransport URL (QUIC) — null when not configured
+  getWtUrl: (editKey: string): string | null => {
+    if (!WT_URL) return null;
+    const token = getToken();
+    return `${WT_URL}/wt/doc/${editKey}?token=${token}`;
   },
 
   // SSE Viewer URL

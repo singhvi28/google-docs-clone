@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from sqlalchemy import select
 
@@ -6,44 +8,81 @@ from app.routes import collab
 
 
 class FakeWebSocket:
-    def __init__(self, *, fail=False):
-        self.fail = fail
+    def __init__(self):
         self.sent = []
 
     async def send_text(self, message):
-        if self.fail:
-            raise RuntimeError("send failed")
         self.sent.append(message)
 
 
-@pytest.mark.asyncio
-async def test_broadcast_sends_to_other_connections_and_removes_dead_sockets():
-    edit_key = "edit-broadcast"
-    sender = FakeWebSocket()
-    receiver = FakeWebSocket()
-    dead = FakeWebSocket(fail=True)
-    collab.document_connections[edit_key] = {sender, receiver, dead}
+class FakePubSub:
+    def __init__(self, messages):
+        self._messages = list(messages)
+        self.unsubscribed = False
+        self.closed = False
 
+    async def listen(self):
+        for message in self._messages:
+            yield message
+        # Hang until cancelled (simulates an open subscription)
+        import asyncio
+        await asyncio.sleep(3600)
+
+    async def unsubscribe(self, channel):
+        self.unsubscribed = True
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_redis_listener_forwards_messages_and_skips_echo():
+    ws = FakeWebSocket()
+    connection_id = "conn-1"
+    pubsub = FakePubSub([
+        {"type": "subscribe", "data": b"ok"},
+        {"type": "message", "data": json.dumps({"type": "awareness", "_sid": "conn-1", "data": "x"}).encode()},
+        {"type": "message", "data": json.dumps({"type": "sync_update", "_sid": "other", "data": "abc"}).encode()},
+    ])
+
+    import asyncio
+    task = asyncio.create_task(collab.redis_listener(pubsub, ws, connection_id))
+    await asyncio.sleep(0.05)
+    task.cancel()
     try:
-        await collab.broadcast(edit_key, sender, "hello")
-    finally:
-        collab.document_connections.pop(edit_key, None)
+        await task
+    except asyncio.CancelledError:
+        pass
 
-    assert sender.sent == []
-    assert receiver.sent == ["hello"]
-    assert dead not in collab.document_connections.get(edit_key, set())
+    assert len(ws.sent) == 1
+    assert json.loads(ws.sent[0]) == {"type": "sync_update", "data": "abc"}
 
 
 @pytest.mark.asyncio
-async def test_flush_to_postgres_persists_cached_crdt_state(
+async def test_flush_to_postgres_merges_updates_and_clears_log(
     session_factory, make_user, make_document, monkeypatch
 ):
+    from pycrdt import Doc, Text
+
     creator = await make_user(email="creator@example.com")
     document = await make_document(creator=creator, edit_key="edit-flush")
     monkeypatch.setattr(collab, "async_session_factory", session_factory)
-    monkeypatch.setattr(
-        collab, "get_cached_crdt_state", lambda edit_key: _async_return(b"cached")
-    )
+
+    d = Doc()
+    d.get("content", type=Text).insert(0, "persisted")
+    update = d.get_update()
+
+    cleared = {"done": False}
+
+    async def fake_get_updates(edit_key):
+        assert edit_key == "edit-flush"
+        return [update]
+
+    async def fake_clear(edit_key):
+        cleared["done"] = True
+
+    monkeypatch.setattr(collab, "get_crdt_updates", fake_get_updates)
+    monkeypatch.setattr(collab, "clear_crdt_updates", fake_clear)
 
     await collab.flush_to_postgres("edit-flush")
 
@@ -53,13 +92,18 @@ async def test_flush_to_postgres_persists_cached_crdt_state(
         )
         refreshed = result.scalar_one()
 
-    assert refreshed.crdt_state == b"cached"
+    assert refreshed.crdt_state is not None
+    assert cleared["done"] is True
+
+    out = Doc()
+    out.apply_update(refreshed.crdt_state)
+    assert str(out.get("content", type=Text)) == "persisted"
 
 
 @pytest.mark.asyncio
-async def test_flush_to_postgres_skips_when_no_cached_state(monkeypatch):
+async def test_flush_to_postgres_skips_when_no_updates(monkeypatch):
     monkeypatch.setattr(
-        collab, "get_cached_crdt_state", lambda edit_key: _async_return(None)
+        collab, "get_crdt_updates", lambda edit_key: _async_return([])
     )
 
     await collab.flush_to_postgres("missing-cache")

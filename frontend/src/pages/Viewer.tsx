@@ -53,7 +53,8 @@ export default function Viewer() {
     eventSource.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'state' && msg.data) {
+        // Initial snapshot (`state`) or live incremental deltas (`sync_update`)
+        if ((msg.type === 'state' || msg.type === 'sync_update' || msg.type === 'sync_state') && msg.data) {
           Y.applyUpdate(ydoc, decodeYjsUpdate(msg.data), 'remote');
         }
       } catch { /* ignore parse errors */ }

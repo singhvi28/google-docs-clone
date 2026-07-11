@@ -50,3 +50,9 @@ logs/
 *.bak
 *.tmp
 .gemini/
+CONTEXT.md
+
+# ─── TLS certs (generated at runtime) ─
+backend/certs/
+*.pem
+*.key

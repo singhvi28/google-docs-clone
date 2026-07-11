@@ -1,55 +1,102 @@
 # Backend Test Suite
 
-This directory contains comprehensive unit and integration tests for the FastAPI backend, utilizing `pytest` and `pytest-asyncio`.
+Unit and integration tests for the FastAPI backend, using `pytest` and `pytest-asyncio`.
 
 ## Testing Architecture & Isolation
 
-The production backend heavily relies on PostgreSQL and Redis, but the test suite is designed to be **completely service-free**. This allows tests to run instantly in local development and CI environments without requiring external dependencies (like Docker containers for databases).
+The production backend depends on PostgreSQL and Redis, but the test suite is **service-free** — no Docker containers or external databases required. Tests run quickly in local development and CI.
 
-- **Database Isolation**: Tests utilize a fresh, in-memory database (via SQLAlchemy's async SQLite dialect or mock session) per test. FastAPI's `get_db` dependency is overridden to inject this test session.
-- **Redis Isolation**: Redis interactions are handled via a patched in-memory fake, bypassing the need for a real Redis server.
-- **Auth Overrides**: Authenticated routes override the `get_current_user` dependency, allowing fixtures to inject mock users (creators, editors, viewers) without needing valid OAuth tokens.
+- **Database isolation**: An in-memory `FakeStore` / `FakeSession` (see `conftest.py`) replaces PostgreSQL. FastAPI's `get_db` dependency is overridden to inject this fake session. `collab` and `viewer` routes also get `async_session_factory` patched to the same store.
+- **Redis isolation**: A patched in-memory `FakeRedis` (in `test_redis_service.py`) implements lists (`RPUSH`/`LRANGE`), counters, hashes, and pub/sub publish — no real Redis server.
+- **Pub/Sub isolation**: Collab and viewer tests use lightweight `FakePubSub` objects that yield scripted messages instead of connecting to Redis.
+- **Auth overrides**: Authenticated routes override `get_current_user`, so fixtures can inject mock users without OAuth tokens.
+
+## What the Tests Cover
+
+The suite validates the production collaboration architecture:
+
+| Area | Behavior under test |
+|------|---------------------|
+| **CRDT update log** | Yjs updates are appended (`RPUSH`), merged via `pycrdt`, and truncated on flush — not overwritten as a single blob |
+| **Distributed Pub/Sub** | WebSocket `redis_listener` forwards channel messages and skips echo via `_sid` |
+| **Postgres flush** | Last editor leaving merges the Redis log, persists to `documents.crdt_state`, and clears the log |
+| **Event-driven SSE** | Viewers receive one initial snapshot, then live `sync_update` deltas from Pub/Sub (no polling loop) |
 
 ## Directory Layout
 
 ### `unit/`
-Unit tests isolate specific functions and helpers to ensure their logic is sound without booting the full FastAPI app.
-- **`test_auth.py`**: Validates JWT encoding/decoding and token expiration logic.
-- **`test_collab.py`**: Tests the WebSocket broadcast logic, ensuring messages are sent correctly, dead sockets are removed, and Redis state is correctly flushed to PostgreSQL.
-- **`test_redis_service.py`**: Verifies the core logic of cache setting/getting, counter incrementing, and approval queue management (against the fake Redis implementation).
-- **`test_utils.py`**: Checks moniker (name) generation and color string formatting.
+
+Isolated logic tests — no full HTTP round-trips.
+
+- **`test_auth.py`**: JWT encoding/decoding and token expiration.
+- **`test_collab.py`**:
+  - `redis_listener` — forwards Pub/Sub messages to a WebSocket and filters out the sender's own `_sid` echo.
+  - `flush_to_postgres` — merges accumulated CRDT updates into Postgres and clears the Redis log; no-ops when the log is empty.
+- **`test_redis_service.py`**:
+  - Append-only CRDT log (`append_crdt_update`, `get_crdt_updates`, `merge_crdt_updates`).
+  - Baseline seeding (`seed_crdt_state_if_empty`).
+  - Backward-compatible cache helpers (`cache_crdt_state`, `get_cached_crdt_state`).
+  - Editor counters, pending-approval queue, and `publish_update`.
+- **`test_utils.py`**: Moniker generation and cursor color formatting.
 
 ### `integration/`
-Integration tests boot an `AsyncClient` (ASGI test client) to simulate actual HTTP and WebSocket requests against the FastAPI app.
-- **`test_auth_routes.py`**: Ensures the `/api/auth/me` profile endpoint returns the correct mock user profile.
-- **`test_documents_routes.py`**: Tests the entire REST API lifecycle for documents. Includes creating documents, fetching document lists (with correct tab filtering for Created/Edited/Viewed), lookup by edit/view keys, and deletion permissions.
-- **`test_health_and_viewer.py`**: Asserts the health check endpoint is responsive. Also verifies the SSE (Server-Sent Events) viewer stream, ensuring read-only clients receive the expected Yjs binary updates.
+
+Boot an `httpx.AsyncClient` (ASGI transport) against the FastAPI app.
+
+- **`test_auth_routes.py`**: `/api/auth/me` returns the authenticated user profile.
+- **`test_documents_routes.py`**: Document REST lifecycle — create, list (Created/Edited/Viewed tabs), lookup by edit/view keys, title updates, and deletion permissions.
+- **`test_health_and_viewer.py`**:
+  - `/api/health` responds with the expected payload.
+  - SSE viewer stream returns 404 for unknown view keys.
+  - Initial merged CRDT state is pushed once on connect.
+  - Live `sync_update` events are forwarded from a fake Pub/Sub subscription (awareness messages are filtered out).
+  - Persisted Postgres state is used when the Redis log is empty, and the log is seeded for subsequent editors.
 
 ### `conftest.py`
-The heart of the test suite. Provides shared `pytest` fixtures:
-- `session_factory`: Provides the isolated in-memory database session.
-- `make_user`, `make_document`, `make_permission`: Factory fixtures for quickly seeding the database.
-- Dependency overrides applied automatically to the FastAPI app for `get_db` and Redis interactions.
+
+Shared fixtures:
+
+- `session_factory` — in-memory fake database session factory.
+- `make_user`, `make_document`, `make_permission` — factory helpers for seeding data.
+- `client` — ASGI test client with `get_db`, `get_current_user`, and route-level session overrides applied.
 
 ## Running Tests
 
-From the repository root:
+From the `backend/` directory:
 
 ```bash
-cd backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-If you already created the virtualenv from the repository root, this also works:
+From the repository root (if the venv already exists):
 
 ```bash
-backend/.venv/bin/python -m pytest backend
+backend/.venv/bin/python -m pytest backend -v
+```
+
+Run a single file or test:
+
+```bash
+pytest tests/unit/test_collab.py -v
+pytest tests/integration/test_health_and_viewer.py::test_viewer_sse_streams_live_sync_updates_from_pubsub -v
 ```
 
 ## Coverage Goals
-- Maintain zero-dependency tests to ensure fast CI runs.
-- Prevent route-order regressions (especially for dynamic keys like `/api/documents/by-edit-key/{key}`).
-- Ensure strict permission boundaries are respected (e.g., only creators can delete documents, unauthorized users are rejected).
+
+- Keep tests zero-dependency so CI stays fast.
+- Guard against route-order regressions (e.g. `/api/documents/by-edit-key/{key}` vs. dynamic segments).
+- Enforce permission boundaries (creators delete, unauthorized users rejected).
+- Prevent collaboration regressions: CRDT log corruption, broken Pub/Sub fan-out, and viewer polling reintroduction.
+
+## Not Covered Here
+
+These require real infrastructure and are not part of this suite:
+
+- End-to-end WebSocket or WebTransport sessions against a live server.
+- Multi-process / multi-container Redis Pub/Sub fan-out.
+- QUIC / HTTP/3 handshake and TLS certificate validation (`app/webtransport_server.py`).
+
+For manual verification of those paths, use `docker compose up` and exercise the editor and viewer in a browser.

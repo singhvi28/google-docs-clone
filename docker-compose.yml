@@ -39,6 +39,7 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+      - "4433:4433/udp"
     environment:
       DATABASE_URL: postgresql+asyncpg://gdocs:gdocs_secret@postgres:5432/gdocs_prod
       REDIS_URL: redis://redis:6379/0
@@ -47,6 +48,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:-super-secret-dev-key-change-in-prod}
       FRONTEND_URL: http://localhost:5173
       BACKEND_URL: http://localhost:8000
+      WEBTRANSPORT_PORT: "4433"
+      TLS_CERTFILE: /app/certs/cert.pem
+      TLS_KEYFILE: /app/certs/key.pem
+    volumes:
+      - backend_certs:/app/certs
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,9 +70,11 @@ services:
     environment:
       VITE_API_URL: http://localhost:8000
       VITE_WS_URL: ws://localhost:8000
+      VITE_WT_URL: https://localhost:4433
     depends_on:
       - backend
 
 volumes:
   pgdata:
   redisdata:
+  backend_certs:

@@ -30,8 +30,12 @@ class Settings(BaseSettings):
 
     # Collaboration limits
     MAX_EDITORS_PER_DOCUMENT: int = 50
-    VIEWER_SYNC_INTERVAL_SECONDS: int = 3
     FLUSH_INTERVAL_SECONDS: int = 300  # 5 minutes
+
+    # WebTransport / QUIC
+    WEBTRANSPORT_PORT: int = 4433
+    TLS_CERTFILE: str = "certs/cert.pem"
+    TLS_KEYFILE: str = "certs/key.pem"
 
     model_config = {
         "env_file": ROOT_ENV_FILE,
