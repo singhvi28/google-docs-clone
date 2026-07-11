@@ -1,0 +1,52 @@
+# ─── Dependencies ─────────────────────
+node_modules/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# ─── Environment Variables ────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Build Outputs ────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ─── IDE & Editor ─────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Docker ───────────────────────────
+docker-compose.override.yml
+
+# ─── Testing ──────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+coverage.xml
+*.cover
+
+# ─── Logs ─────────────────────────────
+*.log
+logs/
+
+# ─── Database ─────────────────────────
+*.db
+*.sqlite3
+
+# ─── Misc ─────────────────────────────
+*.bak
+*.tmp
+.gemini/

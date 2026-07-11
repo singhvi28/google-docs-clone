@@ -1,0 +1,29 @@
+# Web Framework & Server
+fastapi==0.115.12
+hypercorn==0.17.3
+uvloop==0.21.0
+
+# Database
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+alembic==1.16.2
+
+# Redis
+redis[hiredis]==5.3.0
+
+# Auth
+authlib==1.6.0
+httpx==0.28.1
+itsdangerous==2.2.0
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+
+# Yjs CRDT sync
+pycrdt==0.12.13
+pycrdt-websocket==0.15.5
+
+# Utilities
+pydantic==2.11.5
+pydantic-settings==2.9.1
+python-dotenv==1.1.0
+python-multipart==0.0.20

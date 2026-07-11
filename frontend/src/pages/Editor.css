@@ -1,0 +1,167 @@
+/* ═══════════════════════════════════════
+   EDITOR PAGE STYLES
+   ═══════════════════════════════════════ */
+
+.editor-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+/* ─── Header ─── */
+.editor-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 12px;
+}
+
+.editor-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-title-input {
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 1.05rem;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  width: 100%;
+  max-width: 400px;
+  transition: all 0.2s ease;
+}
+
+.editor-title-input:hover {
+  background: var(--bg-surface);
+}
+
+.editor-title-input:focus {
+  background: var(--bg-surface);
+  box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.3);
+}
+
+.editor-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* ─── Status Badge ─── */
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.editor-status.connected {
+  background: rgba(81, 207, 102, 0.1);
+  color: var(--success);
+  border: 1px solid rgba(81, 207, 102, 0.2);
+}
+
+.editor-status.disconnected {
+  background: rgba(255, 107, 107, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(255, 107, 107, 0.2);
+}
+
+.editor-users {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+/* ─── Share Dropdown ─── */
+.editor-share-wrapper {
+  position: relative;
+}
+
+.editor-share-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 300px;
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  z-index: 100;
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.animate-scale-in {
+  animation: scale-in 0.15s ease-out forwards;
+}
+
+.editor-share-dropdown h4 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.share-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+}
+
+.share-link-row + .share-link-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.share-link-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* ─── Editor Canvas ─── */
+.editor-canvas {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.editor-page-container {
+  width: 100%;
+  max-width: 816px; /* A4-ish width */
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  min-height: calc(100vh - 140px);
+  box-shadow: var(--shadow-lg);
+}

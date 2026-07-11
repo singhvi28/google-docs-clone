@@ -1,0 +1,49 @@
+/* ═══════════════════════════════════════
+   APPROVAL POPUP STYLES
+   ═══════════════════════════════════════ */
+
+.approval-popup {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 22px;
+  border-radius: var(--radius-lg);
+  max-width: 380px;
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
+}
+
+.approval-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-gradient-subtle);
+  color: var(--accent-primary);
+  flex-shrink: 0;
+}
+
+.approval-content {
+  flex: 1;
+}
+
+.approval-text {
+  font-size: 0.875rem;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.approval-text strong {
+  color: var(--accent-primary);
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+}
