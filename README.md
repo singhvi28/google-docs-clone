@@ -2,10 +2,23 @@
 
 A full-stack, real-time collaborative document editor inspired by Google Docs. Built with **React + Tiptap + Yjs** on the frontend and **FastAPI + PostgreSQL + Redis** on the backend, with optional **WebTransport (QUIC/HTTP3)** for ultra-low-latency editing alongside a classic **WebSocket** fallback.
 
-![Dark Theme](https://img.shields.io/badge/theme-dark-1a1a2e?style=flat-square)
-![Python](https://img.shields.io/badge/python-3.12-blue?style=flat-square&logo=python)
-![TypeScript](https://img.shields.io/badge/typescript-6.0-blue?style=flat-square&logo=typescript)
-![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+Dark Theme
+Python
+TypeScript
+License
+
+---
+
+## 📊 Stress Testing (Horizontal Scale)
+
+Validated with **two backend containers** behind **NGINX** (REST/WebSocket on `:8080`), sharing one Redis + Postgres. See [`stress/README.md`](stress/README.md) for how to reproduce.
+
+| Test | Setup | Result |
+|------|--------|--------|
+| **Cross-instance reflector** | Client A → `backend1:8000`, Client B → `backend2:8001`, same doc via Redis Pub/Sub | **30/30** round-trips, **0 misses** — avg **4.4 ms**, p95 **5.0 ms** |
+| **Locust load** | **40** concurrent WebSocket editors through NGINX LB, 20s | **4,819** requests, **0 failures**, ~**245 req/s** |
+
+Confirms distributed Pub/Sub fan-out across processes/containers (not in-memory WebSocket registries). Docker stack: `docker compose -f stress/docker-compose.stress.yml up`.
 
 ---
 
@@ -25,10 +38,12 @@ A full-stack, real-time collaborative document editor inspired by Google Docs. B
 
 ---
 
+
+
 ## 🏗️ Architecture
 
 ```text
-┌──────────────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────────────┐
 │                            FRONTEND                                 │
 │  React + TypeScript + Vite                                          │
 │  ┌────────────┐  ┌────────────┐  ┌────────────────────────────────┐ │
@@ -38,15 +53,15 @@ A full-stack, real-time collaborative document editor inspired by Google Docs. B
 │  └────────────┘  └────────────┘  └───────────┬────────────────────┘ │
 │                                              │                      │
 │  ┌─────── Viewer (read-only) ────────────────┼────────────────────┐ │
-│  │  EventSource ← SSE stream                │                    │ │
+│  │  EventSource ← SSE stream                 │                    │ │
 │  └───────────────────────────────────────────┼────────────────────┘ │
 └──────────────────────────────────────────────┼──────────────────────┘
                                                │
               ┌────────────────────────────────┼──────────────────┐
-              │  WebTransport (QUIC/HTTP3)      │  WebSocket (TCP) │
-              │  UDP :4433 (preferred)          │  TCP :8000       │
+              │  WebTransport (QUIC/HTTP3)     │  WebSocket (TCP) │
+              │  UDP :4433 (preferred)         │  TCP :8000       │
               │  • streams → CRDT deltas       │  • JSON frames   │
-              │  • datagrams → cursors          │                  │
+              │  • datagrams → cursors         │                  │
               └────────────────────────────────┼──────────────────┘
                                                │
 ┌──────────────────────────────────────────────┼──────────────────────┐
@@ -78,6 +93,8 @@ A full-stack, real-time collaborative document editor inspired by Google Docs. B
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+
+
 ### Detailed Component Breakdown
 
 - **FastAPI + Hypercorn (ASGI, TCP :8000)**: Serves the REST API, WebSocket collaboration endpoint, and SSE viewer stream. Hypercorn's async event loop handles thousands of concurrent connections.
@@ -96,6 +113,8 @@ A full-stack, real-time collaborative document editor inspired by Google Docs. B
 - **PostgreSQL**: Serves as the ultimate source of truth. The document content is stored in a `BYTEA` column. When the last editor leaves the document, the backend flushes the cached state from Redis into PostgreSQL.
 
 ---
+
+
 
 ## 📁 Project Structure
 
@@ -152,7 +171,11 @@ google-docs-clone/
 
 ---
 
+
+
 ## 🚀 Quick Start
+
+
 
 ### Prerequisites
 
@@ -160,6 +183,8 @@ google-docs-clone/
 - **Python** ≥ 3.12
 - **Docker** + **Docker Compose** (for Postgres & Redis)
 - A **Google OAuth** client ID/secret ([console.cloud.google.com](https://console.cloud.google.com))
+
+
 
 ### 1. Clone & Configure
 
@@ -172,11 +197,15 @@ cp backend/.env.example .env
 # Edit .env with your GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET
 ```
 
+
+
 ### 2. Start Infrastructure (Postgres + Redis)
 
 ```bash
 docker compose up -d postgres redis
 ```
+
+
 
 ### 3. Backend Setup
 
@@ -196,6 +225,8 @@ hypercorn app.main:app --bind 0.0.0.0:8000 --reload
 > **Note:** `start.sh` auto-generates a self-signed TLS certificate for the QUIC server
 > if one doesn't exist at `certs/cert.pem`. Browsers require HTTPS for WebTransport.
 
+
+
 ### 4. Frontend Setup
 
 ```bash
@@ -204,13 +235,19 @@ npm install
 npm run dev
 ```
 
+
+
 ### 5. Open the App
 
-Navigate to **http://localhost:5173** — you'll see the login page.
+Navigate to **[http://localhost:5173](http://localhost:5173)** — you'll see the login page.
 
 ---
 
+
+
 ## 🧪 Running Tests
+
+
 
 ### Backend Tests
 
@@ -221,79 +258,106 @@ pytest -v
 ```
 
 Tests cover:
+
 - **Unit**: auth utilities, Redis service, key generation, collaboration logic
 - **Integration**: document CRUD routes, health endpoint, viewer SSE
 
 ---
 
+
+
 ## 🔧 Environment Variables
+
+
 
 ### Backend
 
-| Variable | Description | Default |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL async connection string | `postgresql+asyncpg://gdocs:gdocs_secret@localhost:5432/gdocs_prod` |
-| `REDIS_URL` | Redis connection string | `redis://localhost:6379/0` |
-| `GOOGLE_CLIENT_ID` | Google OAuth client ID | *(required)* |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret | *(required)* |
-| `JWT_SECRET` | Secret key for signing JWT tokens | *(required in prod)* |
-| `FRONTEND_URL` | Frontend origin for CORS | `http://localhost:5173` |
-| `BACKEND_URL` | Backend origin for OAuth callbacks | `http://localhost:8000` |
-| `WEBTRANSPORT_PORT` | UDP port for QUIC/WebTransport server | `4433` |
-| `TLS_CERTFILE` | TLS certificate path (required for QUIC) | `certs/cert.pem` |
-| `TLS_KEYFILE` | TLS private key path (required for QUIC) | `certs/key.pem` |
+
+| Variable               | Description                              | Default                                                             |
+| ---------------------- | ---------------------------------------- | ------------------------------------------------------------------- |
+| `DATABASE_URL`         | PostgreSQL async connection string       | `postgresql+asyncpg://gdocs:gdocs_secret@localhost:5432/gdocs_prod` |
+| `REDIS_URL`            | Redis connection string                  | `redis://localhost:6379/0`                                          |
+| `GOOGLE_CLIENT_ID`     | Google OAuth client ID                   | *(required)*                                                        |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret               | *(required)*                                                        |
+| `JWT_SECRET`           | Secret key for signing JWT tokens        | *(required in prod)*                                                |
+| `FRONTEND_URL`         | Frontend origin for CORS                 | `http://localhost:5173`                                             |
+| `BACKEND_URL`          | Backend origin for OAuth callbacks       | `http://localhost:8000`                                             |
+| `WEBTRANSPORT_PORT`    | UDP port for QUIC/WebTransport server    | `4433`                                                              |
+| `TLS_CERTFILE`         | TLS certificate path (required for QUIC) | `certs/cert.pem`                                                    |
+| `TLS_KEYFILE`          | TLS private key path (required for QUIC) | `certs/key.pem`                                                     |
+
+
+
 
 ### Frontend
 
-| Variable | Description | Default |
-|---|---|---|
-| `VITE_API_URL` | Backend REST API base URL | `http://localhost:8000` |
-| `VITE_WS_URL` | WebSocket base URL (TCP fallback) | `ws://localhost:8000` |
-| `VITE_WT_URL` | WebTransport base URL (QUIC); empty to disable | *(empty — WebSocket only)* |
+
+| Variable       | Description                                    | Default                    |
+| -------------- | ---------------------------------------------- | -------------------------- |
+| `VITE_API_URL` | Backend REST API base URL                      | `http://localhost:8000`    |
+| `VITE_WS_URL`  | WebSocket base URL (TCP fallback)              | `ws://localhost:8000`      |
+| `VITE_WT_URL`  | WebTransport base URL (QUIC); empty to disable | *(empty — WebSocket only)* |
+
 
 ---
+
+
 
 ## 📡 API Endpoints
 
+
+
 ### REST API (HTTP, TCP :8000)
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/health` | Health check |
-| `GET` | `/api/auth/login` | Initiate Google OAuth |
-| `GET` | `/api/auth/callback` | OAuth callback (redirects to frontend) |
-| `GET` | `/api/auth/me` | Get current user profile |
-| `POST` | `/api/documents/` | Create new document |
-| `GET` | `/api/documents/?tab=created` | List documents by tab |
-| `GET` | `/api/documents/{id}` | Get document by ID |
-| `DELETE` | `/api/documents/{id}` | Delete document (creator only) |
-| `PATCH` | `/api/documents/{id}/title` | Rename document |
-| `GET` | `/api/documents/by-edit-key/{key}` | Lookup by edit key |
-| `GET` | `/api/documents/by-view-key/{key}` | Lookup by view key |
+
+| Method   | Path                               | Description                            |
+| -------- | ---------------------------------- | -------------------------------------- |
+| `GET`    | `/api/health`                      | Health check                           |
+| `GET`    | `/api/auth/login`                  | Initiate Google OAuth                  |
+| `GET`    | `/api/auth/callback`               | OAuth callback (redirects to frontend) |
+| `GET`    | `/api/auth/me`                     | Get current user profile               |
+| `POST`   | `/api/documents/`                  | Create new document                    |
+| `GET`    | `/api/documents/?tab=created`      | List documents by tab                  |
+| `GET`    | `/api/documents/{id}`              | Get document by ID                     |
+| `DELETE` | `/api/documents/{id}`              | Delete document (creator only)         |
+| `PATCH`  | `/api/documents/{id}/title`        | Rename document                        |
+| `GET`    | `/api/documents/by-edit-key/{key}` | Lookup by edit key                     |
+| `GET`    | `/api/documents/by-view-key/{key}` | Lookup by view key                     |
+
+
+
 
 ### Real-Time Endpoints
 
-| Protocol | Path | Port | Description |
-|---|---|---|---|
-| **WebTransport** (QUIC) | `/wt/doc/{edit_key}` | UDP :4433 | Preferred editor transport — CRDT deltas on streams, cursors on datagrams |
-| **WebSocket** (TCP) | `/ws/doc/{edit_key}` | TCP :8000 | Fallback editor transport — all messages as JSON frames |
-| **SSE** (HTTP GET) | `/api/view/{view_key}/stream` | TCP :8000 | Read-only viewer — initial snapshot + live Pub/Sub deltas |
+
+| Protocol                | Path                          | Port      | Description                                                               |
+| ----------------------- | ----------------------------- | --------- | ------------------------------------------------------------------------- |
+| **WebTransport** (QUIC) | `/wt/doc/{edit_key}`          | UDP :4433 | Preferred editor transport — CRDT deltas on streams, cursors on datagrams |
+| **WebSocket** (TCP)     | `/ws/doc/{edit_key}`          | TCP :8000 | Fallback editor transport — all messages as JSON frames                   |
+| **SSE** (HTTP GET)      | `/api/view/{view_key}/stream` | TCP :8000 | Read-only viewer — initial snapshot + live Pub/Sub deltas                 |
+
 
 ---
+
+
 
 ## 🛠️ Tech Stack
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | React 19, TypeScript, Vite, Tiptap (ProseMirror), Yjs, Lucide Icons |
-| **Backend (TCP)** | Python 3.12, FastAPI, Hypercorn (ASGI), SQLAlchemy (async), Authlib |
-| **Backend (QUIC)** | aioquic 1.2 — standalone HTTP/3 WebTransport server |
-| **Database** | PostgreSQL 16 (documents stored as BYTEA CRDT blobs) |
-| **Cache/Pub-Sub** | Redis 7 (CRDT append-log, editor counters, pub/sub, approval queues) |
-| **Auth** | Google OAuth 2.0 + JWT |
-| **Infra** | Docker Compose (TCP :8000, UDP :4433, Postgres, Redis) |
+
+| Layer              | Technology                                                           |
+| ------------------ | -------------------------------------------------------------------- |
+| **Frontend**       | React 19, TypeScript, Vite, Tiptap (ProseMirror), Yjs, Lucide Icons  |
+| **Backend (TCP)**  | Python 3.12, FastAPI, Hypercorn (ASGI), SQLAlchemy (async), Authlib  |
+| **Backend (QUIC)** | aioquic 1.2 — standalone HTTP/3 WebTransport server                  |
+| **Database**       | PostgreSQL 16 (documents stored as BYTEA CRDT blobs)                 |
+| **Cache/Pub-Sub**  | Redis 7 (CRDT append-log, editor counters, pub/sub, approval queues) |
+| **Auth**           | Google OAuth 2.0 + JWT                                               |
+| **Infra**          | Docker Compose (TCP :8000, UDP :4433, Postgres, Redis)               |
+
 
 ---
+
+
 
 ## 📄 License
 
