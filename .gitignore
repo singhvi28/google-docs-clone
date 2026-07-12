@@ -56,3 +56,8 @@ CONTEXT.md
 backend/certs/
 *.pem
 *.key
+
+# ─── Stress testing ──────────────────
+stress/.session.env
+stress/logs/
+stress/.pids/

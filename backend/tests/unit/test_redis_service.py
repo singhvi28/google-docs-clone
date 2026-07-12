@@ -98,6 +98,44 @@ async def test_append_and_merge_crdt_updates(fake_redis):
     assert str(out.get("content", type=Text)) == "Hello World"
 
 
+def test_merge_crdt_updates_skips_corrupt_frames_without_crashing():
+    """
+    Regression: reflector/stress markers used to land in the Redis update log as
+    non-Yjs bytes. The old merge loop called apply_update unconditionally and
+    pycrdt raised PanicException (EndOfBuffer), crashing the event loop on join/flush.
+
+    This would FAIL on the earlier unguarded merge_crdt_updates implementation.
+    """
+    from pycrdt import Doc, Text
+
+    baseline = Doc()
+    baseline.get("content", type=Text).insert(0, "Hello")
+    u1 = bytes(baseline.get_update())
+
+    follow = Doc()
+    follow.apply_update(u1)
+    state_vec = follow.get_state()
+    follow.get("content", type=Text).insert(5, " World")
+    u2 = bytes(follow.get_update(state_vec))
+
+    corrupt = b"STRESS_MARKER:deadbeef"  # same shape as reflector latency markers
+    truncated = b"\x00\x01\xff"  # truncated binary frame
+
+    # Must not raise — old code panicked here on the corrupt entry
+    merged = redis_service.merge_crdt_updates([u1, corrupt, truncated, u2])
+
+    assert merged is not None
+    out = Doc()
+    out.apply_update(merged)
+    assert str(out.get("content", type=Text)) == "Hello World"
+
+
+def test_merge_crdt_updates_returns_none_when_all_frames_are_corrupt():
+    assert redis_service.merge_crdt_updates(
+        [b"STRESS_MARKER:x", b"\x00\xff", b"not-yjs"]
+    ) is None
+
+
 @pytest.mark.asyncio
 async def test_cache_get_and_delete_crdt_state(fake_redis):
     await redis_service.cache_crdt_state("edit-1", b"state")

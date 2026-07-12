@@ -18,6 +18,7 @@ The suite validates the production collaboration architecture:
 | Area | Behavior under test |
 |------|---------------------|
 | **CRDT update log** | Yjs updates are appended (`RPUSH`), merged via `pycrdt`, and truncated on flush — not overwritten as a single blob |
+| **Corrupt frame resilience** | `merge_crdt_updates` skips non-Yjs / truncated payloads (`PanicException`) without crashing; keeps valid deltas |
 | **Distributed Pub/Sub** | WebSocket `redis_listener` forwards channel messages and skips echo via `_sid` |
 | **Postgres flush** | Last editor leaving merges the Redis log, persists to `documents.crdt_state`, and clears the log |
 | **Event-driven SSE** | Viewers receive one initial snapshot, then live `sync_update` deltas from Pub/Sub (no polling loop) |
@@ -34,6 +35,7 @@ Isolated logic tests — no full HTTP round-trips.
   - `flush_to_postgres` — merges accumulated CRDT updates into Postgres and clears the Redis log; no-ops when the log is empty.
 - **`test_redis_service.py`**:
   - Append-only CRDT log (`append_crdt_update`, `get_crdt_updates`, `merge_crdt_updates`).
+  - **Corrupt-frame regression** — `merge_crdt_updates` must not crash when the Redis log contains non-Yjs bytes (e.g. stress `STRESS_MARKER:...` payloads or truncated frames). pycrdt raises `PanicException` (`BaseException`, not `Exception`); the merge loop catches it, skips the bad entry, and still merges valid deltas. All-corrupt input returns `None`.
   - Baseline seeding (`seed_crdt_state_if_empty`).
   - Backward-compatible cache helpers (`cache_crdt_state`, `get_cached_crdt_state`).
   - Editor counters, pending-approval queue, and `publish_update`.
@@ -81,6 +83,7 @@ Run a single file or test:
 
 ```bash
 pytest tests/unit/test_collab.py -v
+pytest tests/unit/test_redis_service.py::test_merge_crdt_updates_skips_corrupt_frames_without_crashing -v
 pytest tests/integration/test_health_and_viewer.py::test_viewer_sse_streams_live_sync_updates_from_pubsub -v
 ```
 
@@ -90,6 +93,7 @@ pytest tests/integration/test_health_and_viewer.py::test_viewer_sse_streams_live
 - Guard against route-order regressions (e.g. `/api/documents/by-edit-key/{key}` vs. dynamic segments).
 - Enforce permission boundaries (creators delete, unauthorized users rejected).
 - Prevent collaboration regressions: CRDT log corruption, broken Pub/Sub fan-out, and viewer polling reintroduction.
+- Ensure join/flush survives corrupt Redis log entries (stress markers, truncated frames) without panicking the event loop.
 
 ## Not Covered Here
 

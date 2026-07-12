@@ -5,6 +5,7 @@ CERT_DIR="${CERT_DIR:-/app/certs}"
 CERTFILE="${TLS_CERTFILE:-$CERT_DIR/cert.pem}"
 KEYFILE="${TLS_KEYFILE:-$CERT_DIR/key.pem}"
 WT_PORT="${WEBTRANSPORT_PORT:-4433}"
+HTTP_PORT="${HTTP_PORT:-8000}"
 
 if [ ! -f "$CERTFILE" ] || [ ! -f "$KEYFILE" ]; then
   mkdir -p "$(dirname "$CERTFILE")"
@@ -24,7 +25,7 @@ python -m app.webtransport_server \
   --host 0.0.0.0 \
   --port "$WT_PORT" &
 
-# FastAPI over TCP: REST + WebSocket fallback (plain HTTP for local/dev clients)
+# FastAPI over TCP: REST + WebSocket fallback
 exec hypercorn app.main:app \
-  --bind 0.0.0.0:8000 \
+  --bind "0.0.0.0:${HTTP_PORT}" \
   --worker-class uvloop

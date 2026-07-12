@@ -65,8 +65,25 @@ def merge_crdt_updates(updates: List[bytes]) -> Optional[bytes]:
     from pycrdt import Doc
 
     doc = Doc()
+    applied = 0
     for update in updates:
-        doc.apply_update(update)
+        try:
+            doc.apply_update(update)
+            applied += 1
+        except Exception:
+            # Skip corrupt / non-Yjs payloads (e.g. stress-test markers)
+            logger.warning("Skipping invalid CRDT update (%d bytes)", len(update))
+        except BaseException as exc:
+            # pycrdt raises PanicException (BaseException, not Exception) on truncated frames
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+            logger.warning(
+                "Skipping invalid CRDT update (%d bytes): %s",
+                len(update),
+                type(exc).__name__,
+            )
+    if applied == 0:
+        return None
     return doc.get_update()
 
 

@@ -2,3 +2,7 @@
 
 pytest==9.1.1
 pytest-asyncio==1.4.0
+
+# Optional: stress testing (also listed in ../stress/requirements.txt)
+# locust>=2.32.0
+# websockets>=14.0
