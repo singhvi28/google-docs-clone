@@ -1,0 +1,107 @@
+# Dual-backend stress stack: shared Postgres/Redis, two API+WT instances, NGINX LB.
+#
+# Usage:
+#   docker compose -f stress/docker-compose.stress.yml up --build
+#
+# Endpoints:
+#   REST / WS via LB:  http://localhost:8080
+#   WebTransport LB:   UDP localhost:4443  (maps to container UDP 4433)
+#   Instance 1 direct: http://localhost:8000  + UDP 4433
+#   Instance 2 direct: http://localhost:8001  + UDP 4434
+#   Postgres (host):   localhost:5433  (avoids clash with local :5432)
+#   Redis (host):      localhost:6380  (avoids clash with local :6379)
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gdocs-stress-postgres
+    environment:
+      POSTGRES_USER: gdocs
+      POSTGRES_PASSWORD: gdocs_secret
+      POSTGRES_DB: gdocs_prod
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gdocs -d gdocs_prod"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: gdocs-stress-redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend1:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: gdocs-stress-backend1
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gdocs:gdocs_secret@postgres:5432/gdocs_prod
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: super-secret-dev-key-change-in-prod
+      FRONTEND_URL: http://localhost:5173
+      BACKEND_URL: http://localhost:8000
+      HTTP_PORT: "8000"
+      WEBTRANSPORT_PORT: "4433"
+      TLS_CERTFILE: /app/certs/cert.pem
+      TLS_KEYFILE: /app/certs/key.pem
+      CERT_DIR: /app/certs
+    ports:
+      - "8000:8000"
+      - "4433:4433/udp"
+    volumes:
+      - stress_certs:/app/certs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  backend2:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: gdocs-stress-backend2
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gdocs:gdocs_secret@postgres:5432/gdocs_prod
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: super-secret-dev-key-change-in-prod
+      FRONTEND_URL: http://localhost:5173
+      BACKEND_URL: http://localhost:8001
+      HTTP_PORT: "8000"
+      WEBTRANSPORT_PORT: "4433"
+      TLS_CERTFILE: /app/certs/cert.pem
+      TLS_KEYFILE: /app/certs/key.pem
+      CERT_DIR: /app/certs
+    ports:
+      - "8001:8000"
+      - "4434:4433/udp"
+    volumes:
+      - stress_certs:/app/certs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: gdocs-stress-nginx
+    ports:
+      - "8080:80"
+      - "4443:4433/udp"
+    volumes:
+      - ./nginx.docker.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend1
+      - backend2
+
+volumes:
+  stress_certs:

@@ -1,0 +1,4 @@
+# Extra deps for stress testing (install into backend/.venv)
+locust>=2.32.0
+websockets>=14.0
+httpx>=0.28.0
