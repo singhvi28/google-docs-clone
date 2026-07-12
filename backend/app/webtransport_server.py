@@ -29,25 +29,34 @@ from aioquic.h3.events import (
     WebTransportStreamDataReceived,
 )
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import ProtocolNegotiated, QuicEvent, StreamReset
+from aioquic.quic.events import (
+    ConnectionTerminated,
+    ProtocolNegotiated,
+    QuicEvent,
+    StreamReset,
+)
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.database import async_session_factory
 from app.models import Document, DocumentPermission
 from app.routes.auth import decode_access_token
+from app.services.awareness_batcher import enqueue_awareness, expand_awareness_messages
 from app.services.redis_service import (
     append_crdt_update,
-    decrement_editor_count,
     get_merged_crdt_state,
-    increment_editor_count,
+    heartbeat_editor_session,
     publish_update,
+    register_editor_session,
     remove_pending_editor,
     seed_crdt_state_if_empty,
     subscribe_to_document,
+    unregister_editor_session,
 )
 from app.utils import generate_cursor_color, generate_moniker
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 BIND_HOST = os.environ.get("WEBTRANSPORT_HOST", "0.0.0.0")
 BIND_PORT = int(os.environ.get("WEBTRANSPORT_PORT", "4433"))
@@ -74,8 +83,10 @@ class CollabHandler:
         self._server_stream_id: Optional[int] = None
         self._pubsub = None
         self._listener_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._closed = False
         self._ready = False
+        self._registered = False
         asyncio.get_event_loop().create_task(self._bootstrap())
 
     async def _bootstrap(self) -> None:
@@ -110,7 +121,12 @@ class CollabHandler:
             moniker = perm.moniker if perm else generate_moniker()
             color = perm.cursor_color if perm else generate_cursor_color()
 
-        await increment_editor_count(self._edit_key)
+        await register_editor_session(self._edit_key, self._connection_id)
+        self._registered = True
+        self._heartbeat_task = asyncio.get_event_loop().create_task(
+            self._session_heartbeat_loop()
+        )
+
         if persisted:
             await seed_crdt_state_if_empty(self._edit_key, persisted)
 
@@ -146,6 +162,19 @@ class CollabHandler:
             }).encode(),
         )
 
+    async def _session_heartbeat_loop(self) -> None:
+        interval = settings.SESSION_HEARTBEAT_INTERVAL_SECONDS
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                alive = await heartbeat_editor_session(
+                    self._edit_key, self._connection_id
+                )
+                if not alive:
+                    return
+        except asyncio.CancelledError:
+            raise
+
     async def _redis_listen(self) -> None:
         try:
             async for message in self._pubsub.listen():
@@ -156,6 +185,12 @@ class CollabHandler:
                 try:
                     parsed = json.loads(text)
                 except json.JSONDecodeError:
+                    continue
+                if parsed.get("type") in ("awareness", "awareness_batch"):
+                    for frame in expand_awareness_messages(
+                        parsed, self._connection_id
+                    ):
+                        self._send_datagram(frame)
                     continue
                 if parsed.get("_sid") == self._connection_id:
                     continue
@@ -199,13 +234,8 @@ class CollabHandler:
             return
         if msg.get("type") != "awareness":
             return
-        await publish_update(
-            self._edit_key,
-            json.dumps({
-                "type": "awareness",
-                "data": msg.get("data"),
-                "_sid": self._connection_id,
-            }).encode(),
+        await enqueue_awareness(
+            self._edit_key, msg.get("data"), self._connection_id
         )
 
     async def _handle_stream_message(self, raw: bytes) -> None:
@@ -280,6 +310,12 @@ class CollabHandler:
         if self._closed:
             return
         self._closed = True
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
         if self._listener_task:
             self._listener_task.cancel()
             try:
@@ -292,10 +328,14 @@ class CollabHandler:
                 await self._pubsub.aclose()
             except Exception:
                 pass
-        count = await decrement_editor_count(self._edit_key)
-        if count == 0:
-            from app.routes.collab import flush_to_postgres
-            await flush_to_postgres(self._edit_key)
+        if self._registered:
+            count = await unregister_editor_session(
+                self._edit_key, self._connection_id
+            )
+            self._registered = False
+            if count == 0:
+                from app.routes.collab import flush_to_postgres
+                await flush_to_postgres(self._edit_key)
 
 
 class WebTransportProtocol(QuicConnectionProtocol):
@@ -305,6 +345,11 @@ class WebTransportProtocol(QuicConnectionProtocol):
         self._handler: Optional[CollabHandler] = None
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        if isinstance(event, ConnectionTerminated):
+            if self._handler is not None:
+                self._handler._close_session()
+            return
+
         if isinstance(event, ProtocolNegotiated):
             self._http = H3Connection(self._quic, enable_webtransport=True)
         elif isinstance(event, StreamReset) and self._handler is not None:
@@ -313,6 +358,11 @@ class WebTransportProtocol(QuicConnectionProtocol):
         if self._http is not None:
             for h3_event in self._http.handle_event(event):
                 self._h3_event_received(h3_event)
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        if self._handler is not None:
+            self._handler._close_session()
+        super().connection_lost(exc)
 
     def _h3_event_received(self, event: H3Event) -> None:
         if isinstance(event, HeadersReceived):

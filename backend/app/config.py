@@ -30,7 +30,12 @@ class Settings(BaseSettings):
 
     # Collaboration limits
     MAX_EDITORS_PER_DOCUMENT: int = 50
-    FLUSH_INTERVAL_SECONDS: int = 300  # 5 minutes
+    FLUSH_INTERVAL_SECONDS: int = 60  # periodic Postgres persist while editors active
+    CRDT_CHECKPOINT_THRESHOLD: int = 100  # compact Redis log when LLEN reaches this
+    SESSION_TTL_SECONDS: int = 30
+    SESSION_HEARTBEAT_INTERVAL_SECONDS: int = 10
+    SESSION_SWEEP_INTERVAL_SECONDS: int = 15
+    AWARENESS_BATCH_WINDOW_MS: int = 25
 
     # WebTransport / QUIC
     WEBTRANSPORT_PORT: int = 4433

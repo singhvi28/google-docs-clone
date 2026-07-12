@@ -17,14 +17,18 @@ from sqlalchemy import select
 from app.database import async_session_factory
 from app.models import Document, DocumentPermission
 from app.routes.auth import decode_access_token
+from app.services.awareness_batcher import enqueue_awareness, expand_awareness_messages
 from app.services.redis_service import (
     get_active_editor_count,
-    increment_editor_count,
-    decrement_editor_count,
+    register_editor_session,
+    unregister_editor_session,
+    heartbeat_editor_session,
     append_crdt_update,
     get_merged_crdt_state,
     get_crdt_updates,
     clear_crdt_updates,
+    clear_document_dirty,
+    cache_crdt_state,
     merge_crdt_updates,
     seed_crdt_state_if_empty,
     add_pending_editor,
@@ -50,6 +54,10 @@ async def redis_listener(pubsub, websocket: WebSocket, connection_id: str):
             text = data.decode() if isinstance(data, bytes) else data
             try:
                 parsed = json.loads(text)
+                if parsed.get("type") in ("awareness", "awareness_batch"):
+                    for frame in expand_awareness_messages(parsed, connection_id):
+                        await websocket.send_text(json.dumps(frame))
+                    continue
                 if parsed.get("_sid") == connection_id:
                     continue
                 parsed.pop("_sid", None)
@@ -66,6 +74,19 @@ async def _publish(edit_key: str, payload: dict, connection_id: str) -> None:
     """Publish a JSON payload to the document channel, tagged with sender id."""
     envelope = {**payload, "_sid": connection_id}
     await publish_update(edit_key, json.dumps(envelope).encode())
+
+
+async def _session_heartbeat_loop(edit_key: str, connection_id: str) -> None:
+    """Refresh Redis session TTL so ungraceful disconnects expire cleanly."""
+    interval = settings.SESSION_HEARTBEAT_INTERVAL_SECONDS
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            alive = await heartbeat_editor_session(edit_key, connection_id)
+            if not alive:
+                return
+    except asyncio.CancelledError:
+        raise
 
 
 @router.websocket("/ws/doc/{edit_key}")
@@ -163,7 +184,10 @@ async def document_websocket(
             perm_color = perm.cursor_color if perm else generate_cursor_color()
 
     connection_id = str(uuid.uuid4())
-    await increment_editor_count(edit_key)
+    await register_editor_session(edit_key, connection_id)
+    heartbeat_task = asyncio.create_task(
+        _session_heartbeat_loop(edit_key, connection_id)
+    )
 
     pubsub = await subscribe_to_document(edit_key)
     listener_task = asyncio.create_task(
@@ -207,10 +231,8 @@ async def document_websocket(
                 )
 
             elif msg_type == "awareness":
-                await _publish(
-                    edit_key,
-                    {"type": "awareness", "data": msg.get("data")},
-                    connection_id,
+                await enqueue_awareness(
+                    edit_key, msg.get("data"), connection_id
                 )
 
             elif msg_type == "approve_editor":
@@ -238,6 +260,11 @@ async def document_websocket(
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         listener_task.cancel()
         try:
             await listener_task
@@ -249,16 +276,41 @@ async def document_websocket(
         except Exception:
             pass
 
-        count = await decrement_editor_count(edit_key)
+        count = await unregister_editor_session(edit_key, connection_id)
         if count == 0:
             await flush_to_postgres(edit_key)
+
+
+async def persist_crdt_to_postgres(edit_key: str) -> None:
+    """
+    Merge Redis log → Postgres, then replace the log with a single baseline blob.
+    Used by the periodic flush worker while editors may still be connected.
+    """
+    updates = await get_crdt_updates(edit_key)
+    merged = await asyncio.to_thread(merge_crdt_updates, updates)
+    if not merged:
+        return
+
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(Document).where(Document.edit_key == edit_key)
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.crdt_state = merged
+            await db.commit()
+            logger.info(f"Persisted CRDT state for {edit_key} to Postgres")
+
+    await cache_crdt_state(edit_key, merged)
+    await clear_document_dirty(edit_key)
 
 
 async def flush_to_postgres(edit_key: str):
     """Merge Redis update log into one state, persist to Postgres, truncate log."""
     updates = await get_crdt_updates(edit_key)
-    merged = merge_crdt_updates(updates)
+    merged = await asyncio.to_thread(merge_crdt_updates, updates)
     if not merged:
+        await clear_document_dirty(edit_key)
         return
 
     async with async_session_factory() as db:
@@ -272,3 +324,4 @@ async def flush_to_postgres(edit_key: str):
             logger.info(f"Flushed CRDT state for {edit_key} to Postgres")
 
     await clear_crdt_updates(edit_key)
+    await clear_document_dirty(edit_key)
